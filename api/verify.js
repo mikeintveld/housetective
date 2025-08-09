@@ -52,30 +52,33 @@ export default async function handler(req, res) {
 
     // 3) Call OpenAI Responses API
     const response = await client.responses.create({
-      model: process.env.RENTALGUARD_MODEL || 'gpt-4.1-mini',
-      messages,
-      response_format: { type: 'json_object' },
-      temperature: 0.2,
-      max_output_tokens: 600
-    });
-
-    const raw = response.output_text || response.content?.[0]?.text || '';
-    let parsed;
-    try {
-      parsed = JSON.parse(raw);
-    } catch (e) {
-      console.error('Raw model output:', raw);
-      throw new Error('Model did not return JSON');
+  model: process.env.RENTALGUARD_MODEL || 'gpt-4.1-mini',
+  // Responses API now expects 'input' (messages also works in some SDKs,
+  // but 'input' is safest going forward)
+  input: [
+    { role: 'system', content: DEFAULT_SYSTEM_PROMPT },
+    {
+      role: 'user',
+      content: [
+        url ? { type: 'text', text: `page_url: ${url}` } : null,
+        pageText ? { type: 'text', text: `page_text: ${pageText}` } : null,
+        imageDataUrl ? { type: 'input_image', image_url: imageDataUrl } : null,
+      ].filter(Boolean)
     }
+  ],
+  text: { format: 'json' },   // <-- replaces response_format: { type: 'json_object' }
+  temperature: 0.2,
+  max_output_tokens: 600
+});
 
-    // Bounds check score
-    parsed.score = Math.max(0, Math.min(100, Number(parsed.score || 0)));
-
-    res.status(200).json(parsed);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: err.message || 'Server error' });
-  }
+const raw = response.output_text || response.content?.[0]?.text || '';
+let parsed;
+try {
+  parsed = JSON.parse(raw);
+} catch (e) {
+  console.error('Raw model output:', raw);
+  throw new Error('Model did not return JSON');
+}
 }
 
 const DEFAULT_SYSTEM_PROMPT = `You are "RentalGuard", an expert that detects rental-listing scams. Analyze the provided inputs:
