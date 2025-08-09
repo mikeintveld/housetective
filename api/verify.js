@@ -1,16 +1,12 @@
 // Vercel Serverless Function: /api/verify
-// Runtime: Node.js 20 (global fetch available)
-// Env vars required in Vercel Project Settings:
-//   OPENAI_API_KEY=sk-...    (required)
-//   RENTALGUARD_MODEL=gpt-4.1-mini   (optional)
+// Runtime: Node 20 (global fetch)
+// Env vars in Vercel: OPENAI_API_KEY (required), RENTALGUARD_MODEL (optional)
 
 import OpenAI from "openai";
 
-const client = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// --- CORS helper ---
+// --- CORS ---
 function setCors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
@@ -23,7 +19,6 @@ export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
   try {
-    // Parse body safely (Vercel can pass string or object)
     const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body || {});
     const { url, imageDataUrl } = body;
 
@@ -31,7 +26,7 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "Provide 'url' or 'imageDataUrl' in JSON body." });
     }
 
-    // 1) Best-effort: fetch and strip page text (if URL provided)
+    // --- 1) Best-effort fetch + strip page text ---
     let pageText = "";
     if (url) {
       try {
@@ -45,46 +40,43 @@ export default async function handler(req, res) {
           .replace(/<[^>]+>/g, " ")
           .replace(/\s+/g, " ")
           .trim()
-          .slice(0, 24000); // guard tokens
+          .slice(0, 24000);
       } catch (e) {
-        // Keep going with empty text; we’ll note uncertainty in the model
-        console.warn("Failed to fetch/strip page:", e?.message || e);
+        console.warn("Fetch/strip failed:", e?.message || e);
       }
     }
 
-    // 2) Build model input (multimodal)
+    // --- 2) Build Responses API input with correct block types ---
     const userContent = [
-      url ? { type: "text", text: `page_url: ${url}` } : null,
-      pageText ? { type: "text", text: `page_text: ${pageText}` } : null,
+      url ? { type: "input_text", text: `page_url: ${url}` } : null,
+      pageText ? { type: "input_text", text: `page_text: ${pageText}` } : null,
       imageDataUrl ? { type: "input_image", image_url: imageDataUrl } : null,
     ].filter(Boolean);
 
     const input = [
-      { role: "system", content: DEFAULT_SYSTEM_PROMPT },
-      { role: "user", content: userContent },
+      { role: "system", content: [{ type: "input_text", text: DEFAULT_SYSTEM_PROMPT }] },
+      { role: "user",   content: userContent },
     ];
 
-    // 3) Call OpenAI Responses API
+    // --- 3) Call OpenAI Responses API ---
     const response = await client.responses.create({
       model: process.env.RENTALGUARD_MODEL || "gpt-4.1-mini",
-      // Use 'input' + 'text.format' (response_format is deprecated)
       input,
-      text: { format: "json" },
+      text: { format: "json" }, // replaces deprecated response_format
       temperature: 0.2,
       max_output_tokens: 600,
     });
 
-    // 4) Parse JSON output safely
+    // --- 4) Parse model JSON safely ---
     const raw = response.output_text || response.content?.[0]?.text || "";
     let parsed;
     try {
       parsed = JSON.parse(raw);
     } catch (e) {
-      console.error("Model did not return JSON. Raw output:", raw);
+      console.error("Model did not return JSON. Raw:", raw);
       return res.status(502).json({ error: "Model did not return JSON." });
     }
 
-    // Sanity clamp score
     parsed.score = Math.max(0, Math.min(100, Number(parsed.score || 0)));
 
     return res.status(200).json(parsed);
@@ -94,7 +86,7 @@ export default async function handler(req, res) {
   }
 }
 
-// --- RentalGuard system prompt ---
+// --- System Prompt ---
 const DEFAULT_SYSTEM_PROMPT = `
 You are "RentalGuard", an expert that detects rental-listing scams. Analyze the provided inputs:
 - page_text: plain text extracted from a listing URL (if provided)
@@ -138,3 +130,4 @@ Safety & tone:
 
 Return ONLY the JSON. No extra text.
 `.trim();
+
