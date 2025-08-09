@@ -1,9 +1,0 @@
-{
-  "name": "rentalguard",
-  "version": "1.0.0",
-  "type": "module",
-  "private": true,
-  "dependencies": {
-    "openai": "^4.56.0"
-  }
-}
