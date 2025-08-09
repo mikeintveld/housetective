@@ -1,87 +1,102 @@
-// Vercel serverless function: /api/verify
-// Runtime: Node.js 20 (see vercel.json)
-// Requires: "type": "module" in package.json and dependency "openai"
+// Vercel Serverless Function: /api/verify
+// Runtime: Node.js 20 (global fetch available)
+// Env vars required in Vercel Project Settings:
+//   OPENAI_API_KEY=sk-...    (required)
+//   RENTALGUARD_MODEL=gpt-4.1-mini   (optional)
 
 import OpenAI from "openai";
 
-const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const client = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
 
-// Basic CORS helper
+// --- CORS helper ---
 function setCors(res) {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 }
 
 export default async function handler(req, res) {
   setCors(res);
-  if (req.method === 'OPTIONS') return res.status(200).end();
-  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
+  if (req.method === "OPTIONS") return res.status(200).end();
+  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
   try {
-    const body = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {});
+    // Parse body safely (Vercel can pass string or object)
+    const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body || {});
     const { url, imageDataUrl } = body;
-    if (!url && !imageDataUrl) return res.status(400).json({ error: 'Provide url or imageDataUrl' });
 
-    // 1) Fetch and strip page text if a URL is provided
-    let pageText = '';
-    if (url) {
-      const resp = await fetch(url, { headers: { 'User-Agent': 'RentalGuard/1.0 (+https://vercel.app)' } });
-      const html = await resp.text();
-      pageText = html
-        .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-        .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-        .replace(/<[^>]+>/g, ' ')
-        .replace(/\s+/g, ' ')
-        .trim()
-        .slice(0, 24000);
+    if (!url && !imageDataUrl) {
+      return res.status(400).json({ error: "Provide 'url' or 'imageDataUrl' in JSON body." });
     }
 
-    // 2) Build multimodal request
-    const messages = [
-      { role: 'system', content: DEFAULT_SYSTEM_PROMPT },
-      {
-        role: 'user',
-        content: [
-          url ? { type: 'text', text: `page_url: ${url}` } : null,
-          pageText ? { type: 'text', text: `page_text: ${pageText}` } : null,
-          imageDataUrl ? { type: 'input_image', image_url: imageDataUrl } : null,
-        ].filter(Boolean)
+    // 1) Best-effort: fetch and strip page text (if URL provided)
+    let pageText = "";
+    if (url) {
+      try {
+        const resp = await fetch(url, {
+          headers: { "User-Agent": "RentalGuard/1.0 (+https://vercel.app)" },
+        });
+        const html = await resp.text();
+        pageText = html
+          .replace(/<script[\s\S]*?<\/script>/gi, " ")
+          .replace(/<style[\s\S]*?<\/style>/gi, " ")
+          .replace(/<[^>]+>/g, " ")
+          .replace(/\s+/g, " ")
+          .trim()
+          .slice(0, 24000); // guard tokens
+      } catch (e) {
+        // Keep going with empty text; we’ll note uncertainty in the model
+        console.warn("Failed to fetch/strip page:", e?.message || e);
       }
+    }
+
+    // 2) Build model input (multimodal)
+    const userContent = [
+      url ? { type: "text", text: `page_url: ${url}` } : null,
+      pageText ? { type: "text", text: `page_text: ${pageText}` } : null,
+      imageDataUrl ? { type: "input_image", image_url: imageDataUrl } : null,
+    ].filter(Boolean);
+
+    const input = [
+      { role: "system", content: DEFAULT_SYSTEM_PROMPT },
+      { role: "user", content: userContent },
     ];
 
     // 3) Call OpenAI Responses API
     const response = await client.responses.create({
-  model: process.env.RENTALGUARD_MODEL || 'gpt-4.1-mini',
-  // Responses API now expects 'input' (messages also works in some SDKs,
-  // but 'input' is safest going forward)
-  input: [
-    { role: 'system', content: DEFAULT_SYSTEM_PROMPT },
-    {
-      role: 'user',
-      content: [
-        url ? { type: 'text', text: `page_url: ${url}` } : null,
-        pageText ? { type: 'text', text: `page_text: ${pageText}` } : null,
-        imageDataUrl ? { type: 'input_image', image_url: imageDataUrl } : null,
-      ].filter(Boolean)
+      model: process.env.RENTALGUARD_MODEL || "gpt-4.1-mini",
+      // Use 'input' + 'text.format' (response_format is deprecated)
+      input,
+      text: { format: "json" },
+      temperature: 0.2,
+      max_output_tokens: 600,
+    });
+
+    // 4) Parse JSON output safely
+    const raw = response.output_text || response.content?.[0]?.text || "";
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (e) {
+      console.error("Model did not return JSON. Raw output:", raw);
+      return res.status(502).json({ error: "Model did not return JSON." });
     }
-  ],
-  text: { format: 'json' },   // <-- replaces response_format: { type: 'json_object' }
-  temperature: 0.2,
-  max_output_tokens: 600
-});
 
-const raw = response.output_text || response.content?.[0]?.text || '';
-let parsed;
-try {
-  parsed = JSON.parse(raw);
-} catch (e) {
-  console.error('Raw model output:', raw);
-  throw new Error('Model did not return JSON');
-}
+    // Sanity clamp score
+    parsed.score = Math.max(0, Math.min(100, Number(parsed.score || 0)));
+
+    return res.status(200).json(parsed);
+  } catch (err) {
+    console.error("verify.js error:", err);
+    return res.status(500).json({ error: err?.message || "Internal Server Error" });
+  }
 }
 
-const DEFAULT_SYSTEM_PROMPT = `You are "RentalGuard", an expert that detects rental-listing scams. Analyze the provided inputs:
+// --- RentalGuard system prompt ---
+const DEFAULT_SYSTEM_PROMPT = `
+You are "RentalGuard", an expert that detects rental-listing scams. Analyze the provided inputs:
 - page_text: plain text extracted from a listing URL (if provided)
 - page_url: the URL itself (if provided)
 - images: one or more listing screenshots (if provided)
@@ -121,4 +136,5 @@ Safety & tone:
 - Be factual, calm, and actionable. No legal advice.
 - If inputs are insufficient, return an "uncertain" verdict with specific missing items to check.
 
-Return ONLY the JSON. No extra text.`;
+Return ONLY the JSON. No extra text.
+`.trim();
