@@ -1,9 +1,11 @@
 {
-  "name": "rentalguard",
+  "name": "housetective",
   "version": "1.0.0",
   "private": true,
+  "license": "UNLICENSED",
   "dependencies": {
     "@supabase/supabase-js": "^2.45.4",
     "openai": "^4.56.0"
   }
 }
+
