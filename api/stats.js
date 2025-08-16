@@ -1,102 +1,55 @@
-// api/stats.js
-const { createClient } = require('@supabase/supabase-js');
+// /pages/api/stats.ts
+import type { NextApiRequest, NextApiResponse } from 'next';
+import { createClient } from '@supabase/supabase-js';
 
-module.exports = async (req, res) => {
-  res.setHeader('Access-Control-Allow-Origin', process.env.ALLOWED_ORIGIN || '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  if (req.method === 'OPTIONS') return res.status(200).end();
-  if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
+export default async function handler(req: NextApiRequest, res: NextApiResponse) {
+  const supabase = createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    { global: { headers: { Authorization: req.headers.authorization || '' } } }
+  );
 
-  const SUPABASE_URL = process.env.SUPABASE_URL;
-  const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
-    console.error('[stats] Missing env vars');
-    return res.status(500).json({ error: 'Missing Supabase env vars' });
-  }
+  // total checks
+  const { count: total_checks, error: e1 } = await supabase
+    .from('checks')
+    .select('id', { count: 'exact', head: true });
+  if (e1) return res.status(400).json({ error: e1.message });
 
-  try {
-    const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+  // high risk reports (score >= 60)
+  const { count: high_risk_reports, error: e2 } = await supabase
+    .from('checks')
+    .select('id', { count: 'exact', head: true })
+    .gte('score', 60);
+  if (e2) return res.status(400).json({ error: e2.message });
 
-    // Try the kpis view first
-    const { data: kpi, error: kpiErr } = await supabase.from('kpis').select('*').single();
+  // last 30 days
+  const since = new Date(); since.setDate(since.getDate() - 30);
+  const { data: last30, error: e3 } = await supabase
+    .from('checks')
+    .select('score, red_flags')
+    .gte('created_at', since.toISOString());
+  if (e3) return res.status(400).json({ error: e3.message });
 
-    let totals = {
-      totalChecks: 0,
-      highRiskReports: 0,
-      scamsPrevented: 0,
-      avgRisk30d: 0,
-      mostCommonRedFlag: '—'
-    };
+  const avg_risk_30d = last30?.length ? last30.reduce((s, r) => s + (r.score || 0), 0) / last30.length : 0;
 
-    if (kpiErr) {
-      console.warn('[stats] kpis view not available, falling back:', kpiErr.message);
+  // most common first red flag
+  const tally: Record<string, number> = {};
+  last30?.forEach(r => {
+    const t = Array.isArray(r.red_flags) && r.red_flags[0]?.text ? r.red_flags[0].text : null;
+    if (t) tally[t] = (tally[t] || 0) + 1;
+  });
+  const top = Object.entries(tally).sort((a,b)=>b[1]-a[1])[0];
+  const most_common_red_flag = top?.[0] || '—';
+  const most_common_red_flag_pct = top ? Number(((top[1] / (last30?.length || 1)) * 100).toFixed(1)) : null;
 
-      // Fallback to direct aggregation on checks
-      const { data: all, error: allErr } = await supabase
-        .from('checks')
-        .select('created_at, score, risk_level, red_flags');
+  res.status(200).json({
+    total_checks,
+    scams_prevented: high_risk_reports || 0,
+    high_risk_reports,
+    avg_risk_30d: Number(avg_risk_30d.toFixed(1)),
+    most_common_red_flag,
+    most_common_red_flag_pct
+  });
+}
 
-      if (allErr) {
-        console.error('[stats] checks fallback error:', allErr);
-        return res.status(500).json({ error: allErr.message || 'Query failed' });
-      }
-
-      const total = all.length;
-      const high = all.filter(r => r.risk_level === 'high').length;
-      const avg30Arr = all.filter(r => Date.now() - new Date(r.created_at).getTime() <= 30*24*60*60*1000);
-      const avg30 = avg30Arr.length ? (avg30Arr.reduce((s, r) => s + Number(r.score || 0), 0) / avg30Arr.length) : 0;
-
-      // Count most common red flag text
-      const counts = {};
-      for (const row of all) {
-        if (Array.isArray(row.red_flags) && row.red_flags.length) {
-          const t = String(row.red_flags[0]?.text || '').trim();
-          if (t) counts[t] = (counts[t] || 0) + 1;
-        }
-      }
-      const topFlag = Object.entries(counts).sort((a,b) => b[1]-a[1])[0]?.[0] || '—';
-
-      totals = {
-        totalChecks: total,
-        highRiskReports: high,
-        scamsPrevented: high,     // same as high risk, adjust if you define differently
-        avgRisk30d: Number(avg30.toFixed(1)),
-        mostCommonRedFlag: topFlag
-      };
-    } else {
-      totals = {
-        totalChecks: kpi.total_checks,
-        highRiskReports: kpi.high_risk_reports,
-        scamsPrevented: kpi.scams_prevented,
-        avgRisk30d: Number(kpi.avg_risk_30d),
-        mostCommonRedFlag: kpi.most_common_red_flag
-      };
-    }
-
-    // Recent 5
-    const { data: recent, error: rErr } = await supabase
-      .from('checks')
-      .select('created_at, score, risk_level, red_flags')
-      .order('created_at', { ascending: false })
-      .limit(5);
-
-    if (rErr) {
-      console.error('[stats] recent error:', rErr);
-      return res.status(500).json({ error: rErr.message || 'Recent query failed' });
-    }
-
-    const recentChecks = (recent || []).map(r => ({
-      date: new Date(r.created_at).toISOString().slice(0,10),
-      score: Math.round(Number(r.score)),
-      risk: r.risk_level,
-      topFlag: (Array.isArray(r.red_flags) && r.red_flags[0]?.text) ? String(r.red_flags[0].text) : '—'
-    }));
-
-    return res.status(200).json({ kpi: totals, recentChecks });
-  } catch (e) {
-    console.error('[stats] crash:', e);
-    return res.status(500).json({ error: e.message || 'Server error' });
-  }
-};
 
