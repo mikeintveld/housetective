@@ -1,50 +1,51 @@
-// /api/checks/new.js
+// api/checks/new.js
 import { createClient } from '@supabase/supabase-js';
 
-export default async function handler(req, res) {
-  // CORS (loose for testing)
-  res.setHeader('Access-Control-Allow-Origin', process.env.ALLOWED_ORIGIN || '*');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  if (req.method === 'OPTIONS') return res.status(200).end();
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY // server-side only
+);
 
+export default async function handler(req, res) {
   if (req.method !== 'POST') {
-    res.setHeader('Allow', ['POST', 'OPTIONS']);
-    return res.status(405).json({ error: 'Method Not Allowed' });
+    return res.status(405).json({ error: 'Method not allowed' });
   }
 
   try {
-    const url = process.env.SUPABASE_URL;
-    const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
-    if (!url || !key) return res.status(500).json({ error: 'Missing Supabase env vars' });
+    // 1) Validate caller's JWT from Supabase
+    const auth = req.headers.authorization || '';
+    const token = auth.startsWith('Bearer ') ? auth.slice(7) : null;
+    if (!token) return res.status(401).json({ error: 'Missing bearer token' });
 
-    let body = req.body;
-    if (!body || typeof body === 'string') { try { body = JSON.parse(body || '{}'); } catch { body = {}; } }
+    const { data: userData, error: userErr } = await supabase.auth.getUser(token);
+    if (userErr || !userData?.user?.id) {
+      return res.status(401).json({ error: 'Invalid token' });
+    }
+    const userId = userData.user.id;
 
-    const {
-      score,
-      red_flags = [],
-      top_signals = [],
-      advice = [],
-      recommendation = '',
-      notes = ''
-    } = body;
+    // 2) Extract payload from browser
+    const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body || {};
+    const row = {
+      user_id: userId,            // explicit; trigger would also fill this
+      score: Number(body.score) || 0,
+      red_flags: Array.isArray(body.red_flags) ? body.red_flags : [],
+      top_signals: Array.isArray(body.top_signals) ? body.top_signals : [],
+      advice: Array.isArray(body.advice) ? body.advice : [],
+      recommendation: body.recommendation || '',
+      notes: body.notes || ''
+    };
 
-    if (!Number.isFinite(Number(score))) return res.status(400).json({ error: 'score must be a number' });
+    // 3) Insert
+    const { data, error } = await supabase
+      .from('checks')
+      .insert(row)
+      .select()
+      .single();
 
-    const supabase = createClient(url, key);
-    const { data, error } = await supabase.from('checks').insert([{
-      score: Number(score),
-      red_flags, top_signals, advice, recommendation, notes
-    }]).select('id, created_at, score, risk_level').single();
-
-    if (error) return res.status(500).json({ error: error.message });
-
+    if (error) return res.status(400).json({ error: error.message });
     return res.status(200).json({ ok: true, row: data });
   } catch (e) {
-    return res.status(500).json({ error: e.message || 'Server error' });
+    console.error(e);
+    return res.status(500).json({ error: 'Server error' });
   }
 }
-
-
-
