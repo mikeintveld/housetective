@@ -1,102 +1,68 @@
 // api/stats.js
-const { createClient } = require('@supabase/supabase-js');
+import { createClient } from '@supabase/supabase-js';
 
-module.exports = async (req, res) => {
-  res.setHeader('Access-Control-Allow-Origin', process.env.ALLOWED_ORIGIN || '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  if (req.method === 'OPTIONS') return res.status(200).end();
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+);
+
+export default async function handler(req, res) {
   if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
 
-  const SUPABASE_URL = process.env.SUPABASE_URL;
-  const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
-    console.error('[stats] Missing env vars');
-    return res.status(500).json({ error: 'Missing Supabase env vars' });
-  }
-
   try {
-    const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+    // Validate caller
+    const auth = req.headers.authorization || '';
+    const token = auth.startsWith('Bearer ') ? auth.slice(7) : null;
+    if (!token) return res.status(401).json({ error: 'Missing bearer token' });
+    const { data: userData, error: userErr } = await supabase.auth.getUser(token);
+    if (userErr || !userData?.user?.id) return res.status(401).json({ error: 'Invalid token' });
+    const userId = userData.user.id;
 
-    // Try the kpis view first
-    const { data: kpi, error: kpiErr } = await supabase.from('kpis').select('*').single();
-
-    let totals = {
-      totalChecks: 0,
-      highRiskReports: 0,
-      scamsPrevented: 0,
-      avgRisk30d: 0,
-      mostCommonRedFlag: '—'
-    };
-
-    if (kpiErr) {
-      console.warn('[stats] kpis view not available, falling back:', kpiErr.message);
-
-      // Fallback to direct aggregation on checks
-      const { data: all, error: allErr } = await supabase
-        .from('checks')
-        .select('created_at, score, risk_level, red_flags');
-
-      if (allErr) {
-        console.error('[stats] checks fallback error:', allErr);
-        return res.status(500).json({ error: allErr.message || 'Query failed' });
-      }
-
-      const total = all.length;
-      const high = all.filter(r => r.risk_level === 'high').length;
-      const avg30Arr = all.filter(r => Date.now() - new Date(r.created_at).getTime() <= 30*24*60*60*1000);
-      const avg30 = avg30Arr.length ? (avg30Arr.reduce((s, r) => s + Number(r.score || 0), 0) / avg30Arr.length) : 0;
-
-      // Count most common red flag text
-      const counts = {};
-      for (const row of all) {
-        if (Array.isArray(row.red_flags) && row.red_flags.length) {
-          const t = String(row.red_flags[0]?.text || '').trim();
-          if (t) counts[t] = (counts[t] || 0) + 1;
-        }
-      }
-      const topFlag = Object.entries(counts).sort((a,b) => b[1]-a[1])[0]?.[0] || '—';
-
-      totals = {
-        totalChecks: total,
-        highRiskReports: high,
-        scamsPrevented: high,     // same as high risk, adjust if you define differently
-        avgRisk30d: Number(avg30.toFixed(1)),
-        mostCommonRedFlag: topFlag
-      };
-    } else {
-      totals = {
-        totalChecks: kpi.total_checks,
-        highRiskReports: kpi.high_risk_reports,
-        scamsPrevented: kpi.scams_prevented,
-        avgRisk30d: Number(kpi.avg_risk_30d),
-        mostCommonRedFlag: kpi.most_common_red_flag
-      };
-    }
-
-    // Recent 5
-    const { data: recent, error: rErr } = await supabase
+    // Aggregate KPIs for this user
+    const { data: allRows, error } = await supabase
       .from('checks')
-      .select('created_at, score, risk_level, red_flags')
-      .order('created_at', { ascending: false })
-      .limit(5);
+      .select('score, red_flags, risk_level')
+      .eq('user_id', userId);
 
-    if (rErr) {
-      console.error('[stats] recent error:', rErr);
-      return res.status(500).json({ error: rErr.message || 'Recent query failed' });
+    if (error) return res.status(400).json({ error: error.message });
+
+    const total_checks = allRows.length;
+    const high_risk_reports = allRows.filter(r => r.risk_level === 'high').length;
+    const scams_prevented = high_risk_reports; // your business rule (adjust if needed)
+
+    // Avg over last 30 days
+    const thirtyDaysAgo = Date.now() - 30*24*60*60*1000;
+    const last30 = allRows.filter(r => new Date(r.created_at || 0).getTime() >= thirtyDaysAgo);
+    const avg_risk_30d = last30.length ? (last30.reduce((s, r) => s + Number(r.score || 0), 0) / last30.length) : 0;
+
+    // Most common red flag text
+    const counts = new Map();
+    for (const r of allRows) {
+      const flags = Array.isArray(r.red_flags) ? r.red_flags : [];
+      for (const f of flags) {
+        const key = (f?.text || '').trim();
+        if (!key) continue;
+        counts.set(key, (counts.get(key) || 0) + 1);
+      }
+    }
+    let most_common_red_flag = '—', most_common_red_flag_pct = 0;
+    if (counts.size && total_checks) {
+      let top = ['', 0];
+      counts.forEach((v, k) => { if (v > top[1]) top = [k, v]; });
+      most_common_red_flag = top[0];
+      most_common_red_flag_pct = Math.round((top[1] / total_checks) * 100);
     }
 
-    const recentChecks = (recent || []).map(r => ({
-      date: new Date(r.created_at).toISOString().slice(0,10),
-      score: Math.round(Number(r.score)),
-      risk: r.risk_level,
-      topFlag: (Array.isArray(r.red_flags) && r.red_flags[0]?.text) ? String(r.red_flags[0].text) : '—'
-    }));
-
-    return res.status(200).json({ kpi: totals, recentChecks });
+    return res.status(200).json({
+      total_checks,
+      high_risk_reports,
+      scams_prevented,
+      avg_risk_30d,
+      most_common_red_flag,
+      most_common_red_flag_pct
+    });
   } catch (e) {
-    console.error('[stats] crash:', e);
-    return res.status(500).json({ error: e.message || 'Server error' });
+    console.error(e);
+    return res.status(500).json({ error: 'Server error' });
   }
-};
-
+}
