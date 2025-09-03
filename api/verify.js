@@ -44,22 +44,34 @@ export default async function handler(req, res) {
 
     // ---------- FAST FALLBACK: no page text & no image ----------
     if (!pageText && !imageDataUrl) {
+      const red_flags = [
+        {
+          text: "Listing content could not be accessed (login wall or blocked).",
+          severity: "medium",
+        },
+        {
+          text: "No page text or images available to analyze.",
+          severity: "medium",
+        },
+        {
+          text: "Legitimacy cannot be determined from the URL alone.",
+          severity: "low",
+        },
+      ];
       return res.status(200).json({
         score: 50,
         verdict: "uncertain",
-        top_signals: [
-          "Listing content could not be accessed (login wall or blocked).",
-          "No page text or images available to analyze.",
-          "Legitimacy cannot be determined from the URL alone."
-        ],
+        top_signals: red_flags.map((r) => r.text),
+        red_flags,
         advice: [
           "Upload a screenshot of the listing so we can inspect text and images.",
           "Ask the poster for a live video tour before paying anything.",
           "Do not send deposits or ID documents until after viewing in person.",
         ],
+        recommendation: "Upload more details or screenshots for a deeper check.",
         notes: fetchErr ? `Fetch error: ${fetchErr}` : "Page content unavailable.",
         explanation: "We couldn’t access the listing. Upload a screenshot for a deeper check.",
-        needs_image: true
+        needs_image: true,
       });
     }
 
@@ -114,14 +126,18 @@ function safeParseJSON(text) {
 }
 function coerceResult(obj) {
   const fallback = {
-    score: 0, verdict: "uncertain", top_signals: [],
+    score: 0,
+    verdict: "uncertain",
+    top_signals: [],
     advice: [
       "Request an in-person or live video tour before paying anything.",
       "Never send deposits or ID documents before viewing.",
       "Use secure, traceable payment methods; avoid crypto or wire."
     ],
     notes: "Limited information available; proceed cautiously.",
-    explanation: "General safety guidance due to limited inputs."
+    explanation: "General safety guidance due to limited inputs.",
+    red_flags: [],
+    recommendation: "Request more information before proceeding.",
   };
   if (!obj || typeof obj !== "object") return fallback;
   const score = clamp(obj.score, 0, 100, 0);
@@ -132,11 +148,16 @@ function coerceResult(obj) {
   const explanation = str(obj.explanation,
     top_signals.length ? top_signals.join(" • ") : fallback.explanation
   );
-  return { score, verdict, top_signals, advice, notes, explanation };
+  const red_flags = flagArr(obj.red_flags, fallback.red_flags);
+  const recommendation = str(obj.recommendation, fallback.recommendation);
+  return { score, verdict, top_signals, advice, notes, explanation, red_flags, recommendation };
 }
 const clamp = (n,min,max,d=0)=>Number.isFinite(+n)?Math.max(min,Math.min(max,+n)):d;
 const str = (v,d="") => (typeof v==="string" && v.trim()) ? v.trim() : d;
 const arr = (v,d=[]) => Array.isArray(v) ? v.map(x=>String(x)).filter(Boolean) : d;
+const flagArr = (v,d=[]) => Array.isArray(v)
+  ? v.map(r=>({ text:str(r?.text), severity:str(r?.severity,"medium") })).filter(r=>r.text)
+  : d;
 
 /* ---------------- Prompt ---------------- */
 const SYSTEM_PROMPT = `
@@ -148,7 +169,9 @@ Return STRICT JSON ONLY with:
   "top_signals": string[],
   "advice": string[],
   "notes": string,
-  "explanation": string
+  "explanation": string,
+  "red_flags": [{"text": string, "severity": "low" | "medium" | "high"}],
+  "recommendation": string
 }
 Weigh below-market price, pressure to pay before viewing, remote owner, crypto/wire,
 ID/deposit before viewing, off-platform chat (WhatsApp/Telegram), mismatched identities,
@@ -156,6 +179,4 @@ photo/address inconsistencies, stock/watermarked images, poor language, imperson
 Be explicit about uncertainty when inputs are thin. Return ONLY JSON. No extra text.
 `.trim();
 
-
-
-
+export { coerceResult };
