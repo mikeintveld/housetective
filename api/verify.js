@@ -1,16 +1,12 @@
 // /api/verify — Vercel serverless function (Node 20)
 import OpenAI from "openai";
+import { setCORS, handlePreflight } from "./_cors.js";
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-function cors(res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-}
-
 export default async function handler(req, res) {
-  cors(res);
-  if (req.method === "OPTIONS") return res.status(200).end();
+  if (handlePreflight(req, res)) return;
+  setCORS(res);
+
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
   try {
