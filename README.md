@@ -11,6 +11,11 @@ This project provides a serverless endpoint your Webflow site can call to verify
    - In Vercel Project Settings → *Environment Variables*, add:
      - `OPENAI_API_KEY` = your OpenAI API key
      - (optional) `RENTALGUARD_MODEL` = `gpt-4.1-mini`
+     - `SUPABASE_URL` = your Supabase project URL
+     - `SUPABASE_SERVICE_ROLE_KEY` = your Supabase service role key (server only)
+     - (optional) `CORS_ORIGIN` = allowed origin for CORS
+     - `NEXT_PUBLIC_SUPABASE_URL` = same as `SUPABASE_URL` but safe for the browser
+     - `NEXT_PUBLIC_SUPABASE_ANON_KEY` = your Supabase anon key
 
 3. **Deploy**
    - After deploy, your endpoint will be:

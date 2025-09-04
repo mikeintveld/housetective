@@ -1,4 +1,4 @@
-export function setCORS(res, origin = process.env.ALLOWED_ORIGIN || '*') {
+export function setCORS(res, origin = process.env.CORS_ORIGIN || '*') {
   res.setHeader('Access-Control-Allow-Origin', origin);
   res.setHeader('Vary', 'Origin');
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
