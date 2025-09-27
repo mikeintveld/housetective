@@ -4,7 +4,7 @@
 <!-- ==== BOOTSTRAP AUTH (shared) ==== -->
 <script>
   window.htAuth = (function () {
-    const supabaseUrl = "https://housetective-4tej.supabase.co";   // your Supabase URL
+    const supabaseUrl = "https://zitxqptkanckudmngech.supabase.co";   // your Supabase URL
     const supabaseAnonKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InppdHhxcHRrYW5ja3VkbW5nZWNoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTUyNTMwMjQsImV4cCI6MjA3MDgyOTAyNH0.dIO7P3yL5xezQfD-JcuA4ZWohr3SKfuVPX_JdGPrRdQ";
     const supabase = window.supabase.createClient(supabaseUrl, supabaseAnonKey, {
       auth: { persistSession: true, detectSessionInUrl: true }
