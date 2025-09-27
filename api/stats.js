@@ -1,80 +1,54 @@
-// api/stats.js
+// housetective/api/stats.js
 const { createClient } = require('@supabase/supabase-js');
 
 module.exports = async (req, res) => {
-  res.setHeader('Access-Control-Allow-Origin', process.env.ALLOWED_ORIGIN || '*');
+  // CORS (lock this down in production)
+  const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || 'https://your.site';
+  res.setHeader('Access-Control-Allow-Origin', ALLOWED_ORIGIN);
+  res.setHeader('Vary', 'Origin');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  if (req.method === 'OPTIONS') return res.status(200).end();
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('Access-Control-Max-Age', '86400');
+  if (req.method === 'OPTIONS') return res.status(204).end();
   if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
 
-  const SUPABASE_URL = process.env.SUPABASE_URL;
-  const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY } = process.env;
   if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
     console.error('[stats] Missing env vars');
     return res.status(500).json({ error: 'Missing Supabase env vars' });
   }
 
+  const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+
   try {
-    const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
-
-    // Try the kpis view first
-    const { data: kpi, error: kpiErr } = await supabase.from('kpis').select('*').single();
-
-    let totals = {
-      totalChecks: 0,
-      highRiskReports: 0,
-      scamsPrevented: 0,
-      avgRisk30d: 0,
-      mostCommonRedFlag: '—'
-    };
+    // 1) KPIs from SQL view
+    const { data: kpi, error: kpiErr } = await supabase
+      .from('kpis')
+      .select('*')
+      .maybeSingle();
 
     if (kpiErr) {
-      console.warn('[stats] kpis view not available, falling back:', kpiErr.message);
-
-      // Fallback to direct aggregation on checks
-      const { data: all, error: allErr } = await supabase
-        .from('checks')
-        .select('created_at, score, risk_level, red_flags');
-
-      if (allErr) {
-        console.error('[stats] checks fallback error:', allErr);
-        return res.status(500).json({ error: allErr.message || 'Query failed' });
-      }
-
-      const total = all.length;
-      const high = all.filter(r => r.risk_level === 'high').length;
-      const avg30Arr = all.filter(r => Date.now() - new Date(r.created_at).getTime() <= 30*24*60*60*1000);
-      const avg30 = avg30Arr.length ? (avg30Arr.reduce((s, r) => s + Number(r.score || 0), 0) / avg30Arr.length) : 0;
-
-      // Count most common red flag text
-      const counts = {};
-      for (const row of all) {
-        if (Array.isArray(row.red_flags) && row.red_flags.length) {
-          const t = String(row.red_flags[0]?.text || '').trim();
-          if (t) counts[t] = (counts[t] || 0) + 1;
-        }
-      }
-      const topFlag = Object.entries(counts).sort((a,b) => b[1]-a[1])[0]?.[0] || '—';
-
-      totals = {
-        totalChecks: total,
-        highRiskReports: high,
-        scamsPrevented: high,     // same as high risk, adjust if you define differently
-        avgRisk30d: Number(avg30.toFixed(1)),
-        mostCommonRedFlag: topFlag
-      };
-    } else {
-      totals = {
-        totalChecks: kpi.total_checks,
-        highRiskReports: kpi.high_risk_reports,
-        scamsPrevented: kpi.scams_prevented,
-        avgRisk30d: Number(kpi.avg_risk_30d),
-        mostCommonRedFlag: kpi.most_common_red_flag
-      };
+      console.error('[stats] KPI view error:', kpiErr);
+      return res.status(500).json({ error: 'KPI query failed' });
     }
 
-    // Recent 5
+    // Normalize KPI payload to snake_case expected by the Webflow embed
+    const totals = {
+      total_checks: Number(kpi?.total_checks ?? 0),
+      high_risk_reports: Number(kpi?.high_risk_reports ?? 0),
+      scams_prevented: Number(
+        kpi?.scams_prevented ?? kpi?.high_risk_reports ?? 0
+      ),
+      // accept either avg_risk_30d (windowed) or avg_risk_alltime (forever)
+      avg_risk_30d: Number.parseFloat(
+        kpi?.avg_risk_30d ?? kpi?.avg_risk_alltime ?? 0
+      ),
+      most_common_red_flag: kpi?.most_common_red_flag || '—',
+    };
+
+    // 2) Recent 5 checks (preserve created_at, risk_level, red_flags)
     const { data: recent, error: rErr } = await supabase
       .from('checks')
       .select('created_at, score, risk_level, red_flags')
@@ -83,15 +57,31 @@ module.exports = async (req, res) => {
 
     if (rErr) {
       console.error('[stats] recent error:', rErr);
-      return res.status(500).json({ error: rErr.message || 'Recent query failed' });
+      return res.status(500).json({ error: 'Recent query failed' });
     }
 
-    const recentChecks = (recent || []).map(r => ({
-      date: new Date(r.created_at).toISOString().slice(0,10),
-      score: Math.round(Number(r.score)),
-      risk: r.risk_level,
-      topFlag: (Array.isArray(r.red_flags) && r.red_flags[0]?.text) ? String(r.red_flags[0].text) : '—'
-    }));
+    const recentChecks = (recent ?? []).map((r) => {
+      const raw = Number(r.score);
+      const score = Number.isFinite(raw) ? Math.round(raw) : 0;
+      const red_flags = Array.isArray(r.red_flags) ? r.red_flags : [];
+
+      // Derive a topFlag for convenience (client also handles this)
+      const topFlag =
+        red_flags.length && red_flags[0]?.text
+          ? String(red_flags[0].text).trim() || '—'
+          : '—';
+
+      return {
+        created_at: r.created_at,                 // keep DB field name
+        score,
+        risk_level: r.risk_level || 'unknown',    // snake_case
+        red_flags,                                 // pass-through
+        topFlag,                                   // extra helper for UI
+      };
+    });
+
+    // small cache since this is aggregated/public-ish data
+    res.setHeader('Cache-Control', 'public, max-age=60');
 
     return res.status(200).json({ kpi: totals, recentChecks });
   } catch (e) {
@@ -99,3 +89,4 @@ module.exports = async (req, res) => {
     return res.status(500).json({ error: e.message || 'Server error' });
   }
 };
+
